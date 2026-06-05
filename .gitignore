@@ -53,3 +53,5 @@ wheels/
 *.njsproj
 *.sln
 *.sw?
+
+ml_pipeline/dataset_synthetic
