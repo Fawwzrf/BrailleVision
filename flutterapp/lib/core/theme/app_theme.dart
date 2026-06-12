@@ -271,7 +271,7 @@ class AppTheme {
         color: AppColors.textSecondary,
         size: 20,
       ),
-      cardTheme: CardThemeData(
+      cardTheme: CardTheme(
         color: AppColors.surface,
         elevation: 0,
         margin: EdgeInsets.zero,

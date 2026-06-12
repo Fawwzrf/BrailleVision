@@ -53,8 +53,67 @@ class AppConstants {
 
   // ─── Camera ────────────────────────────────────────────────
   static const int frameThrottleMs   = 150;
-  static const int modelInputWidth   = 224;
-  static const int modelInputHeight  = 224;
+
+  // ─── ML Model (Integration Engineer) ───────────────────────
+  // Custom CNN: input (1, 64, 64, 3) float32, output (1, 26) softmax A–Z.
+  static const String modelAssetPath    = 'assets/models/braille_vision.tflite';
+  static const String labelMapAssetPath = 'assets/models/label_map.json';
+  static const int    modelInputWidth   = 64;
+  static const int    modelInputHeight  = 64;
+  // Per-cell confidence below this is treated as "no reliable letter".
+  static const double minCellConfidence = 0.55;
+
+  // ─── Frame Skipping (thermal/perf — PRD target ~6 FPS) ─────
+  // Process 1 frame, then skip [frameSkipCount] frames. With a 30 FPS
+  // camera, skip=4 → ~6 FPS effective inference rate.
+  static const int frameSkipCount = 4;
+
+  // ─── Region of Interest (center crop fed to the pipeline) ──
+  // Fraction of the frame (centered) that is processed. Matches the
+  // viewfinder area roughly without exact orientation mapping.
+  static const double roiWidthFactor  = 0.80;
+  static const double roiHeightFactor = 0.55;
+  // Working height (px) the ROI is scaled to before segmentation.
+  static const int    segmentWorkHeight = 96;
+
+  // ─── DIP Preprocessing (port of CV Engineer notebook) ──────
+  static const int    threshBlockSize   = 11; // odd
+  static const int    threshC           = 2;
+  static const int    morphKernelSize   = 2;
+
+  // ─── Cell Segmentation (Projection Profile — legacy) ───────
+  static const double segProjThreshold = 0.5; // min white px (normalized) per row/col
+  static const int    segMinGap        = 3;   // consecutive empty lines that end a segment
+  static const int    segMinCellWidth  = 6;   // discard slivers narrower than this (px)
+
+  // ─── Grid Decoder (dot-blob detection → braille grid) ──────
+  // Active method. Detects individual dots, reconstructs the braille
+  // lattice, reads the 6-dot pattern per cell, decodes via the table.
+  static const int    gridMinDotArea       = 2;    // reject specks smaller than this (px)
+  static const double gridMaxDotAreaFactor  = 8.0;  // reject blobs > N× median dot area
+  static const double gridCellGapFactor     = 1.2;  // x-gap > a*this → new cell
+  static const double gridLineGapFactor     = 1.8;  // y-gap > a*this → new text line
+  static const int    gridMinDots           = 2;    // need at least this many dots to decode
+
+  // ─── Temporal Voting (stability — PRD: text stable in 2s window) ─
+  static const int    votingWindowSize    = 5;   // last N predictions
+  static const int    votingMinAgreement  = 2;   // min votes for winner to be emitted
+
+  // ─── Auto Text-to-Speech ───────────────────────────────────
+  // Speak a stable result automatically once it settles (PRD 5.3).
+  static const bool   autoSpeakEnabled  = true;
+  static const int    autoSpeakDebounceMs = 1200;
+
+  // ─── Classifier Framing ────────────────────────────────────
+  // The model was trained on DARK dots over a LIGHT background, one
+  // braille cell centered with margins (see synthetic_data_generation).
+  // We normalize live crops to that look before inference.
+  static const double classifierMarginFraction = 0.16; // border around cell
+
+  // ─── Debug ─────────────────────────────────────────────────
+  // Shows an on-screen overlay (cell count, per-cell letter+confidence)
+  // and prints the same to the console. Turn OFF for production/demo.
+  static const bool debugOverlayEnabled = true;
 
   // ─── TTS ───────────────────────────────────────────────────
   static const double ttsDefaultRate    = 0.48;

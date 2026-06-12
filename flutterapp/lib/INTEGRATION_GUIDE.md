@@ -115,10 +115,46 @@ _MockControlBar(...)
 
 ## Checklist Integrasi
 
-- [ ] Tambahkan TFLite / OpenCV dependency ke `pubspec.yaml`
-- [ ] Implementasi konversi `CameraImage` (YUV420 → format model)
-- [ ] Isi zona integrasi di `CameraService.startStream()`
-- [ ] Test `DetectionState` transitions (idle → detecting → detected)
-- [ ] Pastikan `onFrameResult` tidak dipanggil terlalu sering (throttle jika perlu)
-- [ ] Hapus `_MockControlBar` dari `scanner_screen.dart`
-- [ ] Update bahasa TTS sesuai kebutuhan multi-bahasa (opsional)
+- [x] Tambahkan TFLite dependency ke `pubspec.yaml` (`tflite_flutter`)
+- [x] Implementasi konversi `CameraImage` (YUV420 → grayscale) — `pipeline/yuv_converter.dart`
+- [x] Isi zona integrasi di `CameraService.startStream()` (frame-skipping + busy-guard)
+- [x] `DetectionState` transitions (idle → detecting → detected) digerakkan oleh pipeline
+- [x] Throttle frame: frame-skipping ~6 FPS + busy-guard (drop frame saat inferensi berjalan)
+- [x] Hapus `_MockControlBar` dari `scanner_screen.dart`
+- [ ] Update bahasa TTS sesuai kebutuhan multi-bahasa (opsional — `TtsService.setLanguage`)
+
+---
+
+## ✅ Integrasi Terpasang (Integration Engineer)
+
+Pipeline penuh **DIP → ML → Temporal Voting** sesuai PRD §6 sudah terhubung.
+Semua modul ada di `lib/features/scanner/pipeline/`:
+
+```
+CameraImage (YUV420)
+  → [CameraService] frame-skipping (skip 4, ~6 FPS) + busy-guard
+  → [YuvConverter]  Y-plane → grayscale upright (rotasi sesuai sensor)
+  → [GrayImage]     center-crop ROI + scale ke tinggi kerja
+  → [BraillePreprocessor]  Gaussian blur → adaptive threshold → erode/dilate  (biner)
+  → [BrailleSegmenter]     Horizontal/Vertical Projection Profile → bbox sel
+  → [BrailleClassifier]    TFLite (64×64×3, grayscale /255) → huruf + confidence
+  → [TemporalVoter]        voting per-posisi (5 frame, mayoritas) → teks stabil
+  → ScannerProvider.state  → UI + auto-TTS (debounce)
+```
+
+**Parameter tuning** ada di `core/constants/app_constants.dart`
+(`frameSkipCount`, `votingWindowSize`, `votingMinAgreement`, `minCellConfidence`,
+`roiWidthFactor/HeightFactor`, `thresh*`, `seg*`).
+
+### Catatan penting untuk tim
+1. **Model input = 64×64×3** (bukan 224). Custom CNN, output softmax A–Z.
+   Model yang dipakai: `braille_vision_f16_synth.tflite` (disalin ke `assets/models/`).
+2. **Preprocessing klasifikasi = grayscale mentah `/255`** agar cocok dengan cara
+   model dilatih (`load_and_preprocess`). Hasil **biner** dari modul DIP **hanya**
+   dipakai untuk *segmentasi* (mencari posisi sel), bukan untuk diumpankan ke model.
+   → Jika tim ML melatih ulang model pada citra biner, ubah `BrailleClassifier`
+   agar memakai `BraillePreprocessor`.
+3. **Optimasi lanjutan (belum):** inferensi berjalan di main isolate. Untuk perangkat
+   low-end, pindahkan pipeline ke `Isolate` / `IsolateInterpreter` bila terasa nge-lag.
+4. **Segmentasi multi-huruf** mengikuti notebook CV (projection profile); parameter
+   `seg*` mungkin perlu di-tuning pada kondisi kamera nyata.

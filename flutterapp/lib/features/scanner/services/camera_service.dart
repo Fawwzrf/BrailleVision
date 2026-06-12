@@ -9,6 +9,7 @@
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
+import '../../../core/constants/app_constants.dart';
 
 /// Enum representing the current detection state of the viewfinder.
 enum DetectionState {
@@ -22,37 +23,40 @@ enum DetectionState {
   detected,
 }
 
-/// Callback type for processed frame results.
-/// [translatedText] — The Braille translation result.
-/// [state] — The detection confidence state.
-typedef FrameResultCallback = void Function({
-  required String translatedText,
-  required DetectionState state,
-});
+/// Callback type for raw camera frames that survive frame-skipping.
+/// The Integration Engineer's pipeline runs inside this callback.
+/// It is awaited, so the busy-guard can drop frames while one is still
+/// being processed (prevents inference pile-up / overheating).
+typedef RawFrameCallback = Future<void> Function(CameraImage frame);
 
 class CameraService {
-  CameraService({this.onFrameResult});
+  CameraService({this.onFrameAvailable});
 
   /// ─── INTEGRATION POINT ──────────────────────────────────────
-  /// Assign this callback to receive processed frame results.
-  /// Your ML pipeline should call this with the translation output.
-  ///
-  /// Example (from your integration code):
-  /// ```dart
-  /// cameraService.onFrameResult = ({translatedText, state}) {
-  ///   ref.read(scannerProvider.notifier).updateResult(translatedText, state);
-  /// };
-  /// ```
-  FrameResultCallback? onFrameResult;
+  /// Assign this callback to receive raw frames for ML processing.
+  /// Only ~1 of every (frameSkipCount + 1) frames is delivered, and
+  /// a new frame is dropped while the previous one is still running.
+  RawFrameCallback? onFrameAvailable;
 
   CameraController? _controller;
   List<CameraDescription> _cameras = [];
   bool _isInitialized = false;
   bool _isStreaming = false;
 
+  // Frame-skipping / busy-guard state.
+  int _frameCounter = 0;
+  bool _isProcessing = false;
+
   CameraController? get controller => _controller;
   bool get isInitialized => _isInitialized;
   bool get isStreaming => _isStreaming;
+
+  /// Quarter-turns needed to bring the sensor buffer upright, derived
+  /// from the active camera's sensor orientation (90° → 1 turn).
+  int get rotationQuarterTurns {
+    final degrees = _controller?.description.sensorOrientation ?? 90;
+    return (degrees ~/ 90) % 4;
+  }
 
   /// Initializes the camera. Call after permissions are granted.
   Future<void> initialize() async {
@@ -75,34 +79,27 @@ class CameraService {
     }
   }
 
-  /// Starts the image stream for frame-by-frame processing.
+  /// Starts the image stream with frame-skipping for thermal/perf.
   ///
-  /// ─── INTEGRATION POINT ──────────────────────────────────────
-  /// Replace the comment block below with your actual frame
-  /// processing logic (TFLite inference, OpenCV preprocessing, etc.)
-  ///
-  /// The [CameraImage] provides raw YUV420 frames. Convert to
-  /// RGB/grayscale as needed by your ML model.
+  /// Only ~1 of every (frameSkipCount + 1) frames is forwarded to
+  /// [onFrameAvailable] (PRD target ≈6 FPS). A busy-guard additionally
+  /// drops any frame that arrives while the previous one is still being
+  /// processed, so heavy inference can never queue up and overheat.
   Future<void> startStream() async {
     if (!_isInitialized || _isStreaming) return;
 
     await _controller!.startImageStream((CameraImage frame) {
-      // ── BEGIN INTEGRATION ZONE ──────────────────────────────
-      // TODO (Integration Engineer): Process [frame] here.
-      //
-      // 1. Convert CameraImage (YUV420) to usable format.
-      // 2. Run your Braille detection model (TFLite/OpenCV).
-      // 3. Call [onFrameResult] with the result.
-      //
-      // Example:
-      // final result = await myBrailleModel.process(frame);
-      // onFrameResult?.call(
-      //   translatedText: result.text,
-      //   state: result.confidence > 0.85
-      //       ? DetectionState.detected
-      //       : DetectionState.detecting,
-      // );
-      // ── END INTEGRATION ZONE ────────────────────────────────
+      // ── Frame skipping ──────────────────────────────────────
+      const n = AppConstants.frameSkipCount + 1;
+      if (_frameCounter++ % n != 0) return;
+
+      // ── Busy-guard: drop frame if a previous one is in flight ─
+      if (_isProcessing) return;
+      final callback = onFrameAvailable;
+      if (callback == null) return;
+
+      _isProcessing = true;
+      callback(frame).whenComplete(() => _isProcessing = false);
     });
 
     _isStreaming = true;
@@ -113,6 +110,8 @@ class CameraService {
     if (!_isStreaming) return;
     await _controller?.stopImageStream();
     _isStreaming = false;
+    _isProcessing = false;
+    _frameCounter = 0;
   }
 
   /// Switches between front and rear cameras.

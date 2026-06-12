@@ -50,7 +50,13 @@ export 'services/camera_service.dart'
     show
         CameraService,
         DetectionState,
-        FrameResultCallback;
+        RawFrameCallback;
+
+// ─── Pipeline (DIP + ML + Temporal Voting) ────────────────────
+export 'pipeline/braille_pipeline.dart'
+    show
+        BraillePipeline,
+        PipelineResult;
 
 export 'services/tts_service.dart'
     show

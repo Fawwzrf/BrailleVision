@@ -8,11 +8,13 @@
 // ============================================================
 
 import 'dart:async';
+import 'package:camera/camera.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../../../core/constants/app_constants.dart';
+import '../pipeline/braille_pipeline.dart';
 import '../services/camera_service.dart';
 import '../services/tts_service.dart';
-import '../../../core/constants/app_constants.dart';
 
 // ─── State Model ─────────────────────────────────────────────
 
@@ -25,6 +27,7 @@ class ScannerState {
     this.translatedText = '',
     this.ttsState = TtsState.idle,
     this.errorMessage,
+    this.debugInfo = '',
   });
 
   final PermissionStatus permissionStatus;
@@ -34,6 +37,7 @@ class ScannerState {
   final String translatedText;
   final TtsState ttsState;
   final String? errorMessage;
+  final String debugInfo;
 
   bool get hasResult => translatedText.isNotEmpty;
   bool get isPermissionGranted => permissionStatus == PermissionStatus.granted;
@@ -47,6 +51,7 @@ class ScannerState {
     TtsState? ttsState,
     String? errorMessage,
     bool clearError = false,
+    String? debugInfo,
   }) {
     return ScannerState(
       permissionStatus: permissionStatus ?? this.permissionStatus,
@@ -56,6 +61,7 @@ class ScannerState {
       translatedText: translatedText ?? this.translatedText,
       ttsState: ttsState ?? this.ttsState,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
+      debugInfo: debugInfo ?? this.debugInfo,
     );
   }
 }
@@ -70,7 +76,11 @@ class ScannerNotifier extends StateNotifier<ScannerState> {
 
   final CameraService _cameraService = CameraService();
   final TtsService _ttsService = TtsService();
-  Timer? _mockDetectionTimer;
+  final BraillePipeline _pipeline = BraillePipeline();
+
+  // Auto-TTS debounce.
+  Timer? _autoSpeakTimer;
+  String _lastSpokenText = '';
 
   // Expose camera service so ScannerScreen can attach the preview
   CameraService get cameraService => _cameraService;
@@ -88,8 +98,11 @@ class ScannerNotifier extends StateNotifier<ScannerState> {
 
   Future<void> _initCamera() async {
     try {
-      // Wire up the frame result callback
-      _cameraService.onFrameResult = _onFrameResult;
+      // Load the TFLite model before streaming starts.
+      await _pipeline.init();
+
+      // Wire the raw-frame callback (runs the DIP+ML+voting pipeline).
+      _cameraService.onFrameAvailable = _onFrame;
 
       await _cameraService.initialize();
       await _cameraService.startStream();
@@ -102,21 +115,33 @@ class ScannerNotifier extends StateNotifier<ScannerState> {
     }
   }
 
-  // ─── INTEGRATION POINT ───────────────────────────────────
-  // This method is called by the camera stream callback.
-  // Your ML pipeline should eventually call this (via onFrameResult).
-  //
-  // You can also call this directly for testing:
-  // ref.read(scannerProvider.notifier).updateTranslation('Halo Dunia', DetectionState.detected);
+  // ─── Frame Processing ────────────────────────────────────
+  // Called for each frame that survives CameraService frame-skipping.
+  // Runs the full pipeline and pushes the vote-stabilized result.
 
-  void _onFrameResult({
-    required String translatedText,
-    required DetectionState state,
-  }) {
-    updateTranslation(translatedText, state);
+  Future<void> _onFrame(CameraImage frame) async {
+    final result = _pipeline.process(
+      frame,
+      rotationQuarterTurns: _cameraService.rotationQuarterTurns,
+    );
+
+    if (result.text != state.translatedText ||
+        result.state != state.detectionState ||
+        result.debug != state.debugInfo) {
+      state = state.copyWith(
+        translatedText: result.text,
+        detectionState: result.state,
+        debugInfo: result.debug,
+      );
+    }
+
+    if (result.state == DetectionState.detected) {
+      _maybeAutoSpeak(result.text);
+    }
   }
 
-  /// Public method for Integration Engineer to push translation results.
+  /// Public injection point: push a translation result directly
+  /// (kept for tests / external pipelines).
   void updateTranslation(String text, DetectionState detectionState) {
     state = state.copyWith(
       translatedText: text,
@@ -124,32 +149,26 @@ class ScannerNotifier extends StateNotifier<ScannerState> {
     );
   }
 
-  // ─── Mock Detection (UI Demo) ─────────────────────────────
-  // Simulates Braille detection for UI development/testing.
-  // Remove or disable this once real ML integration is wired.
+  // ─── Auto Text-to-Speech ─────────────────────────────────
+  // Speaks a stable result once it settles, debounced so it doesn't
+  // read out text that is still changing (PRD §5.3).
 
-  // void startMockDetection() {
-  //   _mockDetectionTimer?.cancel();
-  //   state = state.copyWith(detectionState: DetectionState.detecting);
+  void _maybeAutoSpeak(String text) {
+    if (!AppConstants.autoSpeakEnabled) return;
+    if (text.isEmpty || text == _lastSpokenText) return;
 
-  //   _mockDetectionTimer = Timer(
-  //     const Duration(milliseconds: AppConstants.detectionSimulateDelayMs),
-  //     () {
-  //       state = state.copyWith(
-  //         detectionState: DetectionState.detected,
-  //         translatedText: 'Ini adalah teks hasil terjemahan Braille.',
-  //       );
-  //     },
-  //   );
-  // }
-
-  // void resetDetection() {
-  //   _mockDetectionTimer?.cancel();
-  //   state = state.copyWith(
-  //     detectionState: DetectionState.idle,
-  //     translatedText: '',
-  //   );
-  // }
+    _autoSpeakTimer?.cancel();
+    _autoSpeakTimer = Timer(
+      const Duration(milliseconds: AppConstants.autoSpeakDebounceMs),
+      () {
+        // Only speak if the text is still the current stable result.
+        if (state.translatedText == text && text.isNotEmpty) {
+          _lastSpokenText = text;
+          _ttsService.speak(text);
+        }
+      },
+    );
+  }
 
   // ─── Controls ────────────────────────────────────────────
 
@@ -160,6 +179,7 @@ class ScannerNotifier extends StateNotifier<ScannerState> {
   }
 
   Future<void> toggleCamera() async {
+    _pipeline.reset(); // clear temporal votes for the new view
     await _cameraService.toggleCamera();
   }
 
@@ -180,10 +200,11 @@ class ScannerNotifier extends StateNotifier<ScannerState> {
 
   @override
   void dispose() {
-    _mockDetectionTimer?.cancel();
+    _autoSpeakTimer?.cancel();
     _ttsService.stateNotifier.removeListener(_onTtsStateChange);
     _ttsService.dispose();
     _cameraService.dispose();
+    _pipeline.dispose();
     super.dispose();
   }
 }

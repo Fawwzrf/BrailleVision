@@ -105,15 +105,6 @@ class _ScannerScreenState extends ConsumerState<ScannerScreen>
                       onStopSpeak: notifier.stopSpeaking,
                       onCopy: () => _onCopyText(state.translatedText),
                     ),
-
-                    // ── MOCK BAR (remove after ML integration) ──
-                    // const SizedBox(height: 10),
-                    // _MockControlBar(
-                    //   detectionState: state.detectionState,
-                    //   onStart: notifier.startMockDetection,
-                    //   onReset: notifier.resetDetection,
-                    // ),
-                    // ── END MOCK ────────────────────────────────
                   ],
                 ),
               ),
@@ -173,6 +164,17 @@ class _CameraCard extends StatelessWidget {
               child: Center(
                 child: _ScanningPill(detectionState: state.detectionState),
               ),
+            ),
+
+          // Debug overlay — top center (development only)
+          if (AppConstants.debugOverlayEnabled &&
+              state.isCameraReady &&
+              state.debugInfo.isNotEmpty)
+            Positioned(
+              top: 48,
+              left: 12,
+              right: 12,
+              child: _DebugOverlay(info: state.debugInfo),
             ),
         ],
       ),
@@ -350,6 +352,33 @@ class _AppBarIconButton extends StatelessWidget {
             size: AppConstants.appBarIconSize,
             color: isActive ? AppColors.primary : AppColors.textSecondary,
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Debug Overlay (development only) ────────────────────────
+
+class _DebugOverlay extends StatelessWidget {
+  const _DebugOverlay({required this.info});
+  final String info;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.6),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        info,
+        style: const TextStyle(
+          color: Color(0xFF7CFC00),
+          fontSize: 11,
+          fontFamily: 'monospace',
+          height: 1.3,
         ),
       ),
     );
