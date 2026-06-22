@@ -54,3 +54,4 @@ wheels/
 *.sw?
 
 ml_pipeline/dataset_synthetic
+ml_pipeline/test_ml
