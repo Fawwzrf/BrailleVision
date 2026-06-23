@@ -192,6 +192,13 @@ class BrailleGridDecoder {
   // `a` is the grid unit (dot pitch), derived in [decode] from the
   // spacing between braille ROW clusters — far more stable than a
   // nearest-neighbour estimate.
+  //
+  // Word-space detection: when the horizontal gap between the last
+  // blob of cell N and the first blob of cell N+1 exceeds
+  // `a × gridSpaceGapFactor`, a space marker is inserted between
+  // them. Braille word spacing ≈ 3× the dot pitch, so the default
+  // threshold (3.0) is conservative enough to avoid false spaces
+  // while still catching genuine blank cells between words.
   static void _decodeLine(List<_Blob> line, double a, List<DecodedCell> out) {
     if (line.isEmpty) return;
 
@@ -201,20 +208,46 @@ class BrailleGridDecoder {
     }
 
     final sorted = [...line]..sort((p, q) => p.cx.compareTo(q.cx));
-    final cellGap = a * AppConstants.gridCellGapFactor;
+    final cellGap  = a * AppConstants.gridCellGapFactor;
+    final spaceGap = a * AppConstants.gridSpaceGapFactor;
 
     var cell = <_Blob>[];
     double? prevCx;
+    // Gap (blob-center distance) that preceded the CURRENT accumulating cell.
+    // Set when we split into a new cell; consumed by flushCell() to decide
+    // whether to prepend a word-space marker before the decoded cell.
+    double gapBeforeCurrentCell = 0;
+
+    // Flush the accumulated blobs as one DecodedCell, optionally preceded
+    // by a space marker when the gap before it was very wide.
+    void flushCell() {
+      if (cell.isEmpty) return;
+      // Insert a word-space if the gap leading into this cell is large.
+      if (gapBeforeCurrentCell > spaceGap && out.isNotEmpty) {
+        final prev = out.last;
+        out.add(DecodedCell(
+          ' ', [0, 0, 0, 0, 0, 0],
+          prev.x1, prev.y0,
+          prev.x1 + (a * 1.5).round(), prev.y1,
+        ));
+      }
+      out.add(_decodeCell(cell, a, lineMinCy));
+      cell = <_Blob>[];
+      gapBeforeCurrentCell = 0;
+    }
+
     for (final b in sorted) {
       if (prevCx != null && b.cx - prevCx > cellGap && cell.isNotEmpty) {
-        out.add(_decodeCell(cell, a, lineMinCy));
-        cell = <_Blob>[];
+        final gap = b.cx - prevCx; // gap from last-blob-of-prev to first-blob-of-next
+        flushCell();
+        gapBeforeCurrentCell = gap;
       }
       cell.add(b);
       prevCx = b.cx;
     }
-    if (cell.isNotEmpty) out.add(_decodeCell(cell, a, lineMinCy));
+    flushCell();
   }
+
 
   /// Estimates the dot pitch from the smallest gap between adjacent
   /// row clusters (the true row pitch). Falls back to a multiple of the

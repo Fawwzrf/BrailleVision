@@ -9,15 +9,17 @@
 //     → YUV/Y-plane → upright grayscale          (YuvConverter)
 //     → center-crop ROI + scale to work height   (GrayImage)
 //     → binarize (adaptive threshold + morph)     (BraillePreprocessor)
-//     → projection-profile cell boxes             (BrailleSegmenter)
+//     → dot detection + braille grid decode       (BrailleGridDecoder)
 //     → classify each cell (TFLite, grayscale)    (BrailleClassifier)
 //     → assemble letters → temporal voting         (TemporalVoter)
+//     → output majority voting over string history (stability guard)
 //     → stable text + DetectionState
 //
 // Owned by ScannerNotifier; runs on demand for the frames that
 // survive CameraService's frame-skipping.
 // ============================================================
 
+import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'package:camera/camera.dart';
 import '../../../core/constants/app_constants.dart';
@@ -46,12 +48,32 @@ class BraillePipeline {
   );
   int _rejectStreak = 0;
 
+  // ── Output Stability Guard (lapisan ketiga, di atas temporal voter) ──
+  //
+  // MASALAH dengan pendekatan "consecutive streak":
+  //   Jika voter output berganti-ganti "HALO"/"HAL"/"HALO"/"HAL"...,
+  //   streak counter terus reset → candidate tidak pernah dipromosikan.
+  //
+  // SOLUSI — Majority voting atas riwayat output:
+  //   Simpan [pipelineOutputWindowSize] output voter terakhir.
+  //   Tampilkan teks yang MENANG MAYORITAS (≥ pipelineOutputMinAgreement)
+  //   dalam window itu, tanpa syarat berturut-turut.
+  //   Contoh: "HALO" muncul 6 dari 8 frame → ditampilkan meski 2 frame
+  //   noise muncul "HAL" atau "".
+  String _lastDisplayedText = '';
+  final Queue<String> _outputHistory = Queue<String>();
+
   bool get isReady => _classifier.isReady;
 
   Future<void> init() => _classifier.load();
 
-  /// Clears the temporal buffer (e.g. on camera switch / resume).
-  void reset() => _voter.reset();
+  /// Clears all buffers (e.g. on camera switch / resume).
+  void reset() {
+    _voter.reset();
+    _lastDisplayedText = '';
+    _outputHistory.clear();
+    _rejectStreak = 0;
+  }
 
   /// Runs the full chain on a single frame and returns the stable,
   /// vote-smoothed result.
@@ -114,15 +136,22 @@ class BraillePipeline {
     final isBraille = _looksLikeBraille(result, ruleLetters.length, cells.length);
     final votedInput = isBraille ? chosen : const <String>[];
 
-    // Clear stale text quickly once we're confident it's NOT braille.
+    // Clear stale text once we're confident it's NOT braille.
     if (isBraille) {
       _rejectStreak = 0;
     } else if (++_rejectStreak >= AppConstants.gridRejectStreakToClear) {
+      // Cukup lama tidak ada braille → bersihkan semua buffer sekaligus.
       _voter.reset();
+      _lastDisplayedText = '';
+      _outputHistory.clear();
+      _rejectStreak = 0; // reset agar tidak terus-menerus clear tiap frame
     }
 
-    // 7. Temporal voting → stable text (ML-primary letters).
-    final stableText = _voter.add(votedInput);
+    // 7. Temporal voting → voted text per posisi sel.
+    final rawVoted = _voter.add(votedInput);
+
+    // 8. Output majority-voting guard → stable displayed text.
+    final stableText = _applyOutputGuard(rawVoted);
 
     final DetectionState state;
     if (stableText.isNotEmpty) {
@@ -140,12 +169,58 @@ class BraillePipeline {
           'a:${result.pitch.toStringAsFixed(1)} '
           'a/d:${ratio.toStringAsFixed(1)} cells:${cells.length} '
           '${isBraille ? "OK" : "REJECT"}\n'
+          'voted:"$rawVoted" hist:${_outputHistory.length}\n'
           'rule:$ruleDbg\n'
           'ml:${mlDbg.join(" ")}  →  "$stableText"';
       debugPrint('[BraillePipeline] $debug');
     }
 
     return PipelineResult(stableText, state, 1.0, debug);
+  }
+
+  // ── Output majority-voting guard ─────────────────────────────
+  //
+  // Simpan [pipelineOutputWindowSize] voted-string terakhir dalam queue.
+  // String yang menang mayoritas (≥ pipelineOutputMinAgreement votes)
+  // dipromosikan sebagai displayed text.
+  //
+  // TIDAK ada syarat "berturut-turut":
+  //   "HALO" muncul 6×, "HAL" muncul 2× dari 8 frame terakhir
+  //   → "HALO" menang (6 ≥ 5) → ditampilkan.
+  //   Ini robust meski sesekali ada frame noise di antara frame benar.
+  //
+  // Displayed text TIDAK berubah selama tidak ada pemenang baru.
+  // Sehingga teks lama tetap terlihat saat frame sesekali gagal.
+  String _applyOutputGuard(String voted) {
+    // Masukkan voted string ke history (string kosong juga dicatat).
+    _outputHistory.addLast(voted);
+    while (_outputHistory.length > AppConstants.pipelineOutputWindowSize) {
+      _outputHistory.removeFirst();
+    }
+
+    // Hitung vote tiap string non-kosong.
+    final counts = <String, int>{};
+    for (final v in _outputHistory) {
+      if (v.isNotEmpty) counts[v] = (counts[v] ?? 0) + 1;
+    }
+    if (counts.isEmpty) return _lastDisplayedText;
+
+    // Cari pemenang (string dengan vote terbanyak).
+    String? winner;
+    int bestCount = 0;
+    counts.forEach((text, count) {
+      if (count > bestCount) {
+        bestCount = count;
+        winner = text;
+      }
+    });
+
+    // Promosikan hanya jika pemenang melampaui threshold mayoritas.
+    if (winner != null && bestCount >= AppConstants.pipelineOutputMinAgreement) {
+      _lastDisplayedText = winner!;
+    }
+
+    return _lastDisplayedText;
   }
 
   /// Rejects non-braille structures: too few dots, irregular pitch, or a

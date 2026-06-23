@@ -109,6 +109,9 @@ class AppConstants {
   // Jarak antar sel braille nyata ≈ 2× jarak antar titik dalam sel.
   // Nilai 1.25 terlalu kecil → beberapa sel menyatu jadi 1 sel besar.
   static const double gridCellGapFactor     = 1.8;  // x-gap > a*this → new cell
+  // Jarak horizontal antar KATA braille ≈ 3× pitch (lebih besar dari antar sel).
+  // Jika gap blob terakhir sel N ke blob pertama sel N+1 > a×ini → sisipkan spasi.
+  static const double gridSpaceGapFactor    = 3.0;  // x-gap > a*this → word space
   static const double gridLineGapDiamFactor = 3.0;  // y-gap > d*this → new text line
   static const double gridRowClusterDiamFactor = 0.9; // y-gap > d*this → new row cluster
   static const double gridRowPitchFallbackDiam = 1.7; // a ≈ d*this when only one row
@@ -143,6 +146,13 @@ class AppConstants {
   // Efek: output tidak berubah kecuali mayoritas frame benar-benar setuju.
   static const int    votingWindowSize    = 10;  // last N predictions
   static const int    votingMinAgreement  = 5;   // min votes for winner (50% of window)
+  // Lapisan stabilitas KETIGA — majority voting atas riwayat string output voter.
+  // Berbeda dari consecutive-streak: "HALO" cukup muncul N kali dalam window M
+  // (tidak harus berturut-turut). Mengatasi kasus voter berganti-ganti output
+  // di antara frame yang benar (misal "HALO"/"HAL"/"HALO"/"HAL"...).
+  // Window 8 frame @ 6 FPS ≈ 1.3 detik. Threshold 5/8 = 62.5% majority.
+  static const int    pipelineOutputWindowSize   = 8; // riwayat output voter (frame)
+  static const int    pipelineOutputMinAgreement = 5; // min votes untuk promosi ke layar
 
   // ─── Auto Text-to-Speech ───────────────────────────────────
   // Speak a stable result automatically once it settles (PRD 5.3).
