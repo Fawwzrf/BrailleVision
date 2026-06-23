@@ -74,16 +74,33 @@ class BraillePipeline {
     final result = BrailleGridDecoder.decode(binary);
     final cells = result.cells;
 
-    // 5. Rule-decoded letters (skip unknown patterns).
-    final letters = <String>[];
+    // 5. Per cell: rule decode (deterministic) + ML on the REAL cell
+    //    pixels (B2, PRD-faithful). ML is the PRIMARY translator; the
+    //    rule table is the fallback when ML is not confident, and the
+    //    structural validator. `classify()` normalizes the crop per the
+    //    §3 contract (polarity → dark-on-light, centered 64×64).
+    final ruleLetters = <String>[]; // valid rule letters → validation count
+    final chosen = <String>[]; // final per-cell output (ML-primary)
+    final ruleDbg = StringBuffer();
+    final mlDbg = <String>[];
     for (final cell in cells) {
-      if (cell.letter.isNotEmpty) letters.add(cell.letter);
+      if (cell.letter.isNotEmpty) ruleLetters.add(cell.letter);
+
+      final crop = work.crop(cell.x0, cell.y0, cell.width, cell.height);
+      final pred = _classifier.classify(crop);
+      final pick = pred.confidence >= AppConstants.minCellConfidence
+          ? pred.letter // ML primary when confident…
+          : cell.letter; // …else fall back to the deterministic table
+      if (pick.isNotEmpty) chosen.add(pick);
+
+      ruleDbg.write(cell.letter.isEmpty ? '·' : cell.letter);
+      mlDbg.add('${pred.letter}${(pred.confidence * 100).round()}');
     }
 
-    // 6. Validation gate — is this actually braille (not a random object
-    //    or textured noise)? Only feed the voter when it passes.
-    final isBraille = _looksLikeBraille(result, letters.length, cells.length);
-    final votedInput = isBraille ? letters : const <String>[];
+    // 6. Validation gate — structural check via the rule decode. Only
+    //    feed the voter when it actually looks like braille.
+    final isBraille = _looksLikeBraille(result, ruleLetters.length, cells.length);
+    final votedInput = isBraille ? chosen : const <String>[];
 
     // Clear stale text quickly once we're confident it's NOT braille.
     if (isBraille) {
@@ -92,17 +109,7 @@ class BraillePipeline {
       _voter.reset();
     }
 
-    // 7. ML cross-check: render each cell clean and classify with TFLite.
-    final mlCells = <String>[];
-    if (AppConstants.debugOverlayEnabled && isBraille) {
-      for (final cell in cells) {
-        final clean = BrailleGridDecoder.renderCleanCell(cell.pattern);
-        final pred = _classifier.classifyDirect(clean);
-        mlCells.add('${pred.letter}${(pred.confidence * 100).round()}');
-      }
-    }
-
-    // 8. Temporal voting → stable text.
+    // 7. Temporal voting → stable text (ML-primary letters).
     final stableText = _voter.add(votedInput);
 
     final DetectionState state;
@@ -121,8 +128,8 @@ class BraillePipeline {
           'a:${result.pitch.toStringAsFixed(1)} '
           'a/d:${ratio.toStringAsFixed(1)} cells:${cells.length} '
           '${isBraille ? "OK" : "REJECT"}\n'
-          'rule:${letters.join()}\n'
-          'ml:${mlCells.join(" ")}  →  "$stableText"';
+          'rule:$ruleDbg\n'
+          'ml:${mlDbg.join(" ")}  →  "$stableText"';
       debugPrint('[BraillePipeline] $debug');
     }
 

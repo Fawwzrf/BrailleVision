@@ -35,9 +35,14 @@ class _Blob {
 }
 
 class DecodedCell {
-  DecodedCell(this.letter, this.pattern);
+  DecodedCell(this.letter, this.pattern, this.x0, this.y0, this.x1, this.y1);
   final String letter; // '' if pattern unknown
   final List<int> pattern; // [d1..d6]
+  // Full 2×3 cell region in working-image coords (for B2: cropping the
+  // REAL cell so the ML model classifies actual pixels, positions kept).
+  final int x0, y0, x1, y1;
+  int get width => x1 - x0;
+  int get height => y1 - y0;
 }
 
 class GridDecodeResult {
@@ -257,7 +262,16 @@ class BrailleGridDecoder {
       final row = ((b.cy - lineMinCy) / a).round().clamp(0, 2);
       pattern[col * 3 + row] = 1;
     }
-    return DecodedCell(BrailleAlphabet.decode(pattern), pattern);
+
+    // Full cell extent: left col at minCx, right col at minCx+a (2 cols),
+    // 3 rows anchored at lineMinCy, with a half-pitch margin all round.
+    final m = a * 0.5;
+    final x0 = (minCx - m).round();
+    final y0 = (lineMinCy - m).round();
+    final x1 = (minCx + a + m).round();
+    final y1 = (lineMinCy + 2 * a + m).round();
+
+    return DecodedCell(BrailleAlphabet.decode(pattern), pattern, x0, y0, x1, y1);
   }
 
   // ─── Clean-cell renderer (for the ML model comparison) ───
