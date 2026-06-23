@@ -56,7 +56,9 @@ class AppConstants {
 
   // ─── ML Model (Integration Engineer) ───────────────────────
   // Custom CNN: input (1, 64, 64, 3) float32, output (1, 26) softmax A–Z.
-  static const String modelAssetPath    = 'assets/models/braille_vision.tflite';
+  // "realistic" = Anggota 3's retrain with heavy realistic augmentation
+  // (zoom −50%, rotation ±25°, brightness ±40%, noise). Same I/O spec.
+  static const String modelAssetPath    = 'assets/models/braille_vision_realistic.tflite';
   static const String labelMapAssetPath = 'assets/models/label_map.json';
   static const int    modelInputWidth   = 64;
   static const int    modelInputHeight  = 64;
@@ -69,12 +71,14 @@ class AppConstants {
   static const int frameSkipCount = 4;
 
   // ─── Region of Interest (center crop fed to the pipeline) ──
-  // Fraction of the frame (centered) that is processed. Matches the
-  // viewfinder area roughly without exact orientation mapping.
-  static const double roiWidthFactor  = 0.80;
-  static const double roiHeightFactor = 0.55;
+  // Fraction of the frame (centered) that is processed. Kept generous
+  // so the braille is captured even when not perfectly centered; the
+  // grid validator rejects whatever isn't actually braille.
+  static const double roiWidthFactor  = 0.94;
+  static const double roiHeightFactor = 0.80;
   // Working height (px) the ROI is scaled to before segmentation.
-  static const int    segmentWorkHeight = 96;
+  // Higher = more pixels per dot for shape/size analysis.
+  static const int    segmentWorkHeight = 180;
 
   // ─── DIP Preprocessing (port of CV Engineer notebook) ──────
   static const int    threshBlockSize   = 11; // odd
@@ -89,11 +93,34 @@ class AppConstants {
   // ─── Grid Decoder (dot-blob detection → braille grid) ──────
   // Active method. Detects individual dots, reconstructs the braille
   // lattice, reads the 6-dot pattern per cell, decodes via the table.
-  static const int    gridMinDotArea       = 2;    // reject specks smaller than this (px)
+  //
+  // The grid unit `a` (dot pitch) is derived from the spacing between
+  // braille ROW clusters (stable), NOT from nearest-neighbour distance.
+  // Distances below are expressed as multiples of the median dot
+  // diameter `d`, which is the most stable scale we can measure.
+  static const int    gridMinDotArea       = 3;    // reject specks smaller than this (px)
   static const double gridMaxDotAreaFactor  = 8.0;  // reject blobs > N× median dot area
-  static const double gridCellGapFactor     = 1.2;  // x-gap > a*this → new cell
-  static const double gridLineGapFactor     = 1.8;  // y-gap > a*this → new text line
+  static const double gridMinDotAreaFactor  = 0.25; // reject blobs < N× median (fragments)
+  static const double gridCellGapFactor     = 1.25; // x-gap > a*this → new cell
+  static const double gridLineGapDiamFactor = 3.0;  // y-gap > d*this → new text line
+  static const double gridRowClusterDiamFactor = 0.9; // y-gap > d*this → new row cluster
+  static const double gridRowPitchFallbackDiam = 1.7; // a ≈ d*this when only one row
   static const int    gridMinDots           = 2;    // need at least this many dots to decode
+
+  // Blob shape filter — real dots are roughly round and uniform.
+  static const double gridMaxAspect      = 2.0;     // reject elongated blobs (edges)
+  static const double gridMinFillRatio   = 0.40;    // area / bbox-area (circle ≈ 0.79)
+  static const double gridMinDotAreaFrac = 0.0005;  // min area as fraction of ROI area
+
+  // ─── Grid Validation (is this actually braille?) ───────────
+  // Reject random objects / textured noise so the app doesn't claim a
+  // false "braille detected". All conditions must hold.
+  static const int    gridAcceptMinDots         = 4;    // need ≥ this many valid dots
+  static const int    gridAcceptMinCells        = 2;    // need ≥ this many cells
+  static const double gridAcceptMinValidFraction = 0.6; // valid letters / total cells
+  static const double gridPitchRatioMin         = 1.25; // a/d sane braille range…
+  static const double gridPitchRatioMax         = 2.8;  // …(real braille ≈ 1.7)
+  static const int    gridRejectStreakToClear   = 2;    // consecutive REJECTs → clear text
 
   // ─── Temporal Voting (stability — PRD: text stable in 2s window) ─
   static const int    votingWindowSize    = 5;   // last N predictions

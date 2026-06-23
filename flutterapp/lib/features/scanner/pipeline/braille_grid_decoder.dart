@@ -4,9 +4,12 @@
 // INTEGRATION ENGINEER — dot-blob detection + braille grid decode.
 //
 // Replaces the fragile projection-profile segmentation. Strategy:
-//   1. Connected-component labeling on the binary (dots = 255).
-//   2. Estimate the dot pitch `a` (median nearest-neighbour distance).
-//   3. Split blobs into text lines by large vertical gaps.
+//   1. Connected-component labeling on the binary (dots = 255), then
+//      shape/size filtering so texture noise and edges are rejected.
+//   2. Derive the grid unit `a` (dot pitch) from the spacing between
+//      braille ROW clusters — stable, unlike nearest-neighbour.
+//   3. Split blobs into text lines by large vertical gaps (scaled to
+//      the median dot diameter).
 //   4. Per line: anchor the top row, sort dots left→right, group them
 //      into cells by horizontal gaps, then snap each dot to its
 //      (column, row) grid slot → 6-dot pattern.
@@ -17,7 +20,6 @@
 // always the left column — no single-column ambiguity.
 // ============================================================
 
-import 'dart:math' as math;
 import 'dart:typed_data';
 import '../../../core/constants/app_constants.dart';
 import 'braille_alphabet.dart';
@@ -27,6 +29,9 @@ class _Blob {
   _Blob(this.cx, this.cy, this.area, this.minX, this.maxX, this.minY, this.maxY);
   final double cx, cy;
   final int area, minX, maxX, minY, maxY;
+
+  /// Approximate dot diameter (mean of the two bbox sides).
+  double get diameter => ((maxX - minX + 1) + (maxY - minY + 1)) / 2.0;
 }
 
 class DecodedCell {
@@ -35,22 +40,47 @@ class DecodedCell {
   final List<int> pattern; // [d1..d6]
 }
 
+class GridDecodeResult {
+  GridDecodeResult(this.cells, this.blobCount, this.diameter, this.pitch);
+  final List<DecodedCell> cells;
+  final int blobCount; // dots detected after filtering
+  final double diameter; // median dot diameter (px)
+  final double pitch; // grid unit `a` of the densest line (px)
+
+  static final empty = GridDecodeResult(const [], 0, 0, 0);
+}
+
 class BrailleGridDecoder {
   BrailleGridDecoder._();
 
   /// Decodes all cells found in [binary] (dots = 255), reading order.
-  static List<DecodedCell> decode(GrayImage binary) {
+  static GridDecodeResult decode(GrayImage binary) {
     final blobs = _connectedComponents(binary);
-    if (blobs.length < AppConstants.gridMinDots) return const [];
+    if (blobs.length < AppConstants.gridMinDots) {
+      return GridDecodeResult(const [], blobs.length, 0, 0);
+    }
 
-    final a = _estimatePitch(blobs);
-    if (a <= 0) return const [];
+    // Stable scale: median dot diameter. Used to separate text lines.
+    final d = _medianDiameter(blobs);
+    if (d <= 0) return GridDecodeResult(const [], blobs.length, 0, 0);
 
     final cells = <DecodedCell>[];
-    for (final line in _splitLines(blobs, a)) {
+    var repPitch = 0.0;
+    var densestLine = 0;
+    for (final line in _splitLines(blobs, d)) {
+      final a = _rowPitch(line, d);
       _decodeLine(line, a, cells);
+      if (line.length > densestLine) {
+        densestLine = line.length;
+        repPitch = a;
+      }
     }
-    return cells;
+    return GridDecodeResult(cells, blobs.length, d, repPitch);
+  }
+
+  static double _medianDiameter(List<_Blob> blobs) {
+    final dia = blobs.map((b) => b.diameter).toList()..sort();
+    return dia[dia.length ~/ 2];
   }
 
   // ─── 1. Connected components (8-connectivity flood fill) ──
@@ -100,46 +130,46 @@ class BrailleGridDecoder {
       blobs.add(_Blob(sumX / area, sumY / area, area, minX, maxX, minY, maxY));
     }
 
-    return _filterBySize(blobs);
+    return _filterBlobs(blobs, w * h);
   }
 
-  /// Keep dot-sized blobs: reject specks and oversized merged regions.
-  static List<_Blob> _filterBySize(List<_Blob> blobs) {
-    final big = blobs.where((b) => b.area >= AppConstants.gridMinDotArea).toList();
-    if (big.isEmpty) return const [];
+  /// Keeps dot-like blobs only:
+  ///   • round-ish (fill ratio, aspect) → rejects edges/streaks,
+  ///   • large enough (absolute + relative to ROI) → rejects texture
+  ///     specks even when they outnumber the real dots,
+  ///   • size-consistent with the median → rejects outliers.
+  static List<_Blob> _filterBlobs(List<_Blob> blobs, int roiArea) {
+    final absMinArea = (roiArea * AppConstants.gridMinDotAreaFrac)
+        .clamp(AppConstants.gridMinDotArea.toDouble(), double.infinity);
 
-    final areas = big.map((b) => b.area).toList()..sort();
+    final shaped = blobs.where((b) {
+      if (b.area < absMinArea) return false;
+      final bw = b.maxX - b.minX + 1;
+      final bh = b.maxY - b.minY + 1;
+      final aspect = bw > bh ? bw / bh : bh / bw;
+      if (aspect > AppConstants.gridMaxAspect) return false;
+      final fill = b.area / (bw * bh);
+      if (fill < AppConstants.gridMinFillRatio) return false;
+      return true;
+    }).toList();
+    if (shaped.isEmpty) return const [];
+
+    final areas = shaped.map((b) => b.area).toList()..sort();
     final median = areas[areas.length ~/ 2];
     final maxArea = median * AppConstants.gridMaxDotAreaFactor;
-    return big.where((b) => b.area <= maxArea).toList();
+    final minArea = median * AppConstants.gridMinDotAreaFactor;
+    return shaped.where((b) => b.area <= maxArea && b.area >= minArea).toList();
   }
 
-  // ─── 2. Dot pitch via median nearest-neighbour distance ──
-  static double _estimatePitch(List<_Blob> blobs) {
-    final dists = <double>[];
-    for (int i = 0; i < blobs.length; i++) {
-      var best = double.infinity;
-      for (int j = 0; j < blobs.length; j++) {
-        if (i == j) continue;
-        final dx = blobs[i].cx - blobs[j].cx;
-        final dy = blobs[i].cy - blobs[j].cy;
-        final d = dx * dx + dy * dy;
-        if (d < best) best = d;
-      }
-      if (best.isFinite) dists.add(best);
-    }
-    if (dists.isEmpty) return 0;
-    dists.sort();
-    return math.sqrt(dists[dists.length ~/ 2]);
-  }
-
-  // ─── 3. Split blobs into text lines by vertical gaps ─────
-  static List<List<_Blob>> _splitLines(List<_Blob> blobs, double a) {
+  // ─── 2. Split blobs into text lines by vertical gaps ─────
+  // Uses the stable dot diameter `d`: row-to-row gaps are small (~1.7d
+  // centre-to-centre), line-to-line gaps are much larger.
+  static List<List<_Blob>> _splitLines(List<_Blob> blobs, double d) {
     final sorted = [...blobs]..sort((p, q) => p.cy.compareTo(q.cy));
     final lines = <List<_Blob>>[];
     var current = <_Blob>[];
     double? prevCy;
-    final gap = a * AppConstants.gridLineGapFactor;
+    final gap = d * AppConstants.gridLineGapDiamFactor;
 
     for (final b in sorted) {
       if (prevCy != null && b.cy - prevCy > gap && current.isNotEmpty) {
@@ -153,11 +183,13 @@ class BrailleGridDecoder {
     return lines;
   }
 
-  // ─── 4+5. Decode one text line into cells ────────────────
+  // ─── 3+4+5. Decode one text line into cells ──────────────
+  // `a` is the grid unit (dot pitch), derived in [decode] from the
+  // spacing between braille ROW clusters — far more stable than a
+  // nearest-neighbour estimate.
   static void _decodeLine(List<_Blob> line, double a, List<DecodedCell> out) {
     if (line.isEmpty) return;
 
-    // Anchor: top row of the line (some char will own a row-0 dot).
     var lineMinCy = double.infinity;
     for (final b in line) {
       if (b.cy < lineMinCy) lineMinCy = b.cy;
@@ -177,6 +209,40 @@ class BrailleGridDecoder {
       prevCx = b.cx;
     }
     if (cell.isNotEmpty) out.add(_decodeCell(cell, a, lineMinCy));
+  }
+
+  /// Estimates the dot pitch from the smallest gap between adjacent
+  /// row clusters (the true row pitch). Falls back to a multiple of the
+  /// dot diameter when the line has only one row of dots.
+  static double _rowPitch(List<_Blob> line, double d) {
+    final ys = line.map((b) => b.cy).toList()..sort();
+    final clusterGap = d * AppConstants.gridRowClusterDiamFactor;
+
+    final centers = <double>[];
+    var sum = ys.first;
+    var count = 1;
+    var prev = ys.first;
+    for (var i = 1; i < ys.length; i++) {
+      if (ys[i] - prev > clusterGap) {
+        centers.add(sum / count);
+        sum = 0;
+        count = 0;
+      }
+      sum += ys[i];
+      count++;
+      prev = ys[i];
+    }
+    centers.add(sum / count);
+
+    if (centers.length < 2) {
+      return d * AppConstants.gridRowPitchFallbackDiam;
+    }
+    var minSpacing = double.infinity;
+    for (var i = 1; i < centers.length; i++) {
+      final s = centers[i] - centers[i - 1];
+      if (s < minSpacing) minSpacing = s;
+    }
+    return minSpacing;
   }
 
   static DecodedCell _decodeCell(List<_Blob> cell, double a, double lineMinCy) {

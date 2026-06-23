@@ -31,13 +31,19 @@ class BraillePreprocessor {
   /// being the majority we invert it — guaranteeing dots = 255.
   static GrayImage forSegmentation(GrayImage gray) {
     final blurred = _blur3x3(gray);
-    final binary = _adaptiveThreshold(
-      blurred,
-      blockSize: AppConstants.threshBlockSize,
-      c: AppConstants.threshC,
-    );
-    final eroded = _erode(binary, AppConstants.morphKernelSize);
-    final dilated = _dilate(eroded, AppConstants.morphKernelSize);
+
+    // Local-mean window scales with resolution (~3× a dot) so the
+    // threshold adapts to dot size regardless of working height.
+    var block = (gray.height / 7).round();
+    if (block.isEven) block += 1;
+    block = block.clamp(7, 31);
+
+    final binary = _adaptiveThreshold(blurred, blockSize: block, c: AppConstants.threshC);
+
+    // Dilate only (NO erosion): erosion was wiping out faint/low-contrast
+    // dots on hand-made braille. The decoder's shape + size + grid
+    // validation removes the resulting noise instead.
+    final dilated = _dilate(binary, AppConstants.morphKernelSize);
     return _ensureDotsAreForeground(dilated);
   }
 
@@ -129,9 +135,6 @@ class BraillePreprocessor {
   }
 
   // ─── Morphology (binary, square kernel of size k) ─────────
-  static GrayImage _erode(GrayImage img, int k) =>
-      _morph(img, k, erode: true);
-
   static GrayImage _dilate(GrayImage img, int k) =>
       _morph(img, k, erode: false);
 

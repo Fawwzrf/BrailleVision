@@ -44,6 +44,7 @@ class BraillePipeline {
     windowSize: AppConstants.votingWindowSize,
     minAgreement: AppConstants.votingMinAgreement,
   );
+  int _rejectStreak = 0;
 
   bool get isReady => _classifier.isReady;
 
@@ -70,7 +71,8 @@ class BraillePipeline {
     final binary = BraillePreprocessor.forSegmentation(work);
 
     // 4. Detect dots, reconstruct the grid, decode each cell (rule-based).
-    final cells = BrailleGridDecoder.decode(binary);
+    final result = BrailleGridDecoder.decode(binary);
+    final cells = result.cells;
 
     // 5. Rule-decoded letters (skip unknown patterns).
     final letters = <String>[];
@@ -78,9 +80,21 @@ class BraillePipeline {
       if (cell.letter.isNotEmpty) letters.add(cell.letter);
     }
 
-    // 6. ML cross-check: render each cell clean and classify with TFLite.
+    // 6. Validation gate — is this actually braille (not a random object
+    //    or textured noise)? Only feed the voter when it passes.
+    final isBraille = _looksLikeBraille(result, letters.length, cells.length);
+    final votedInput = isBraille ? letters : const <String>[];
+
+    // Clear stale text quickly once we're confident it's NOT braille.
+    if (isBraille) {
+      _rejectStreak = 0;
+    } else if (++_rejectStreak >= AppConstants.gridRejectStreakToClear) {
+      _voter.reset();
+    }
+
+    // 7. ML cross-check: render each cell clean and classify with TFLite.
     final mlCells = <String>[];
-    if (AppConstants.debugOverlayEnabled) {
+    if (AppConstants.debugOverlayEnabled && isBraille) {
       for (final cell in cells) {
         final clean = BrailleGridDecoder.renderCleanCell(cell.pattern);
         final pred = _classifier.classifyDirect(clean);
@@ -88,13 +102,13 @@ class BraillePipeline {
       }
     }
 
-    // 7. Temporal voting → stable text.
-    final stableText = _voter.add(letters);
+    // 8. Temporal voting → stable text.
+    final stableText = _voter.add(votedInput);
 
     final DetectionState state;
     if (stableText.isNotEmpty) {
       state = DetectionState.detected;
-    } else if (letters.isNotEmpty) {
+    } else if (votedInput.isNotEmpty) {
       state = DetectionState.detecting;
     } else {
       state = DetectionState.idle;
@@ -102,12 +116,33 @@ class BraillePipeline {
 
     var debug = '';
     if (AppConstants.debugOverlayEnabled) {
-      debug = 'cells:${cells.length}  rule:${letters.join()}\n'
+      final ratio = result.diameter > 0 ? result.pitch / result.diameter : 0.0;
+      debug = 'dots:${result.blobCount} d:${result.diameter.toStringAsFixed(1)} '
+          'a:${result.pitch.toStringAsFixed(1)} '
+          'a/d:${ratio.toStringAsFixed(1)} cells:${cells.length} '
+          '${isBraille ? "OK" : "REJECT"}\n'
+          'rule:${letters.join()}\n'
           'ml:${mlCells.join(" ")}  →  "$stableText"';
       debugPrint('[BraillePipeline] $debug');
     }
 
     return PipelineResult(stableText, state, 1.0, debug);
+  }
+
+  /// Rejects non-braille structures: too few dots, irregular pitch, or a
+  /// low fraction of cells decoding to real letters.
+  bool _looksLikeBraille(GridDecodeResult r, int validCells, int totalCells) {
+    if (r.blobCount < AppConstants.gridAcceptMinDots) return false;
+    if (totalCells < AppConstants.gridAcceptMinCells) return false;
+    if (r.diameter <= 0) return false;
+
+    final ratio = r.pitch / r.diameter;
+    if (ratio < AppConstants.gridPitchRatioMin ||
+        ratio > AppConstants.gridPitchRatioMax) {
+      return false;
+    }
+    final validFraction = totalCells > 0 ? validCells / totalCells : 0.0;
+    return validFraction >= AppConstants.gridAcceptMinValidFraction;
   }
 
   void dispose() {
