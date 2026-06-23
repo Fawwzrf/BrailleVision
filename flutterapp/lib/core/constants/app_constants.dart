@@ -78,11 +78,15 @@ class AppConstants {
   static const double roiHeightFactor = 0.80;
   // Working height (px) the ROI is scaled to before segmentation.
   // Higher = more pixels per dot for shape/size analysis.
-  static const int    segmentWorkHeight = 180;
+  // ✅ Fix Bug #6: Ditingkatkan 180→280 agar titik braille lebih besar di pixel
+  // dan lebih mudah dideteksi serta di-filter shape/size dengan akurat.
+  static const int    segmentWorkHeight = 280;
 
   // ─── DIP Preprocessing (port of CV Engineer notebook) ──────
   static const int    threshBlockSize   = 11; // odd
-  static const int    threshC           = 2;
+  // ✅ Fix Bug #7: threshC dinaikkan 2→5 agar tekstur serat kertas tidak
+  // ikut tersegmentasi sebagai foreground (noise berlebih).
+  static const int    threshC           = 5;
   static const int    morphKernelSize   = 2;
 
   // ─── Cell Segmentation (Projection Profile — legacy) ───────
@@ -101,7 +105,10 @@ class AppConstants {
   static const int    gridMinDotArea       = 3;    // reject specks smaller than this (px)
   static const double gridMaxDotAreaFactor  = 8.0;  // reject blobs > N× median dot area
   static const double gridMinDotAreaFactor  = 0.25; // reject blobs < N× median (fragments)
-  static const double gridCellGapFactor     = 1.25; // x-gap > a*this → new cell
+  // ✅ Fix Bug #3: Dinaikkan 1.25→1.8 sesuai standar braille fisik.
+  // Jarak antar sel braille nyata ≈ 2× jarak antar titik dalam sel.
+  // Nilai 1.25 terlalu kecil → beberapa sel menyatu jadi 1 sel besar.
+  static const double gridCellGapFactor     = 1.8;  // x-gap > a*this → new cell
   static const double gridLineGapDiamFactor = 3.0;  // y-gap > d*this → new text line
   static const double gridRowClusterDiamFactor = 0.9; // y-gap > d*this → new row cluster
   static const double gridRowPitchFallbackDiam = 1.7; // a ≈ d*this when only one row
@@ -117,9 +124,14 @@ class AppConstants {
   // false "braille detected". All conditions must hold.
   static const int    gridAcceptMinDots         = 4;    // need ≥ this many valid dots
   static const int    gridAcceptMinCells        = 2;    // need ≥ this many cells
-  static const double gridAcceptMinValidFraction = 0.6; // valid letters / total cells
-  static const double gridPitchRatioMin         = 1.25; // a/d sane braille range…
-  static const double gridPitchRatioMax         = 2.8;  // …(real braille ≈ 1.7)
+  // ✅ Fix Bug #4: Diturunkan 0.6→0.4 agar tidak terlalu banyak frame
+  // valid di-REJECT karena threshold terlalu ketat.
+  static const double gridAcceptMinValidFraction = 0.4; // valid letters / total cells
+  // ✅ Fix Bug #5: Range dilebihkan (1.25–2.8 → 0.8–4.5) untuk tolerasi
+  // variasi kondisi kamera HP nyata. Estimasi pitch tidak selalu tepat
+  // terutama saat hanya ada sedikit titik atau 1 baris teks.
+  static const double gridPitchRatioMin         = 0.8;  // a/d sane braille range…
+  static const double gridPitchRatioMax         = 4.5;  // …(real braille ≈ 1.7)
   static const int    gridRejectStreakToClear   = 2;    // consecutive REJECTs → clear text
 
   // ─── Temporal Voting (stability — PRD: text stable in 2s window) ─

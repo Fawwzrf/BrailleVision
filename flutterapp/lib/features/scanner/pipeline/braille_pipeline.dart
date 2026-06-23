@@ -75,12 +75,16 @@ class BraillePipeline {
     final cells = result.cells;
 
     // 5. Per cell: rule decode (deterministic) + ML on the REAL cell
-    //    pixels (B2, PRD-faithful). ML is the PRIMARY translator; the
-    //    rule table is the fallback when ML is not confident, and the
-    //    structural validator. `classify()` normalizes the crop per the
-    //    §3 contract (polarity → dark-on-light, centered 64×64).
+    //    pixels (B2, PRD-faithful).
+    //
+    //    ARSITEKTUR (Fix v2): Rule table adalah PRIMARY translator.
+    //    Alasan: model TFLite dilatih dari data sintetis bersih;
+    //    pada crop kamera nyata model sering collapse ke kelas A (index 0)
+    //    → output "AAA". Rule table deterministik jauh lebih andal.
+    //    ML tetap dijalankan sebagai CROSS-CHECK dan fallback ketika
+    //    rule table tidak bisa decode pola (cell.letter kosong).
     final ruleLetters = <String>[]; // valid rule letters → validation count
-    final chosen = <String>[]; // final per-cell output (ML-primary)
+    final chosen = <String>[]; // final per-cell output (rule-primary)
     final ruleDbg = StringBuffer();
     final mlDbg = <String>[];
     for (final cell in cells) {
@@ -88,9 +92,17 @@ class BraillePipeline {
 
       final crop = work.crop(cell.x0, cell.y0, cell.width, cell.height);
       final pred = _classifier.classify(crop);
-      final pick = pred.confidence >= AppConstants.minCellConfidence
-          ? pred.letter // ML primary when confident…
-          : cell.letter; // …else fall back to the deterministic table
+
+      // Rule table DULU (deterministik, lebih andal di kondisi kamera nyata).
+      // ML hanya dipakai bila rule tidak bisa decode (pola tidak dikenal).
+      final String pick;
+      if (cell.letter.isNotEmpty) {
+        pick = cell.letter; // ✅ Rule table PRIMARY
+      } else if (pred.confidence >= AppConstants.minCellConfidence) {
+        pick = pred.letter; // ML fallback ketika pola tidak dikenal rule
+      } else {
+        pick = ''; // keduanya tidak cukup confident → skip
+      }
       if (pick.isNotEmpty) chosen.add(pick);
 
       ruleDbg.write(cell.letter.isEmpty ? '·' : cell.letter);

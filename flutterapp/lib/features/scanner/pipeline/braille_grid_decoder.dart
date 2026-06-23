@@ -252,24 +252,31 @@ class BrailleGridDecoder {
 
   static DecodedCell _decodeCell(List<_Blob> cell, double a, double lineMinCy) {
     var minCx = double.infinity;
+    // ✅ Fix Bug #2: Gunakan minCy dari TITIK-TITIK DI SEL INI SENDIRI,
+    // bukan lineMinCy global. lineMinCy bisa berasal dari sel lain di baris
+    // yang sama, sehingga row-offset terdistorsi dan huruf terbaca salah
+    // (misal d2 dihitung sebagai row 0 → 'B' terbaca 'A').
+    var cellMinCy = double.infinity;
     for (final b in cell) {
       if (b.cx < minCx) minCx = b.cx;
+      if (b.cy < cellMinCy) cellMinCy = b.cy;
     }
 
     final pattern = List<int>.filled(6, 0);
     for (final b in cell) {
       final col = ((b.cx - minCx) / a).round().clamp(0, 1);
-      final row = ((b.cy - lineMinCy) / a).round().clamp(0, 2);
+      // Gunakan cellMinCy sebagai referensi row (bukan lineMinCy)
+      final row = ((b.cy - cellMinCy) / a).round().clamp(0, 2);
       pattern[col * 3 + row] = 1;
     }
 
     // Full cell extent: left col at minCx, right col at minCx+a (2 cols),
-    // 3 rows anchored at lineMinCy, with a half-pitch margin all round.
+    // 3 rows anchored at cellMinCy, with a half-pitch margin all round.
     final m = a * 0.5;
     final x0 = (minCx - m).round();
-    final y0 = (lineMinCy - m).round();
+    final y0 = (cellMinCy - m).round();
     final x1 = (minCx + a + m).round();
-    final y1 = (lineMinCy + 2 * a + m).round();
+    final y1 = (cellMinCy + 2 * a + m).round();
 
     return DecodedCell(BrailleAlphabet.decode(pattern), pattern, x0, y0, x1, y1);
   }
