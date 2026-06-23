@@ -132,11 +132,17 @@ class AppConstants {
   // terutama saat hanya ada sedikit titik atau 1 baris teks.
   static const double gridPitchRatioMin         = 0.8;  // a/d sane braille range…
   static const double gridPitchRatioMax         = 4.5;  // …(real braille ≈ 1.7)
-  static const int    gridRejectStreakToClear   = 2;    // consecutive REJECTs → clear text
+  // Hapus teks stabil segera setelah tidak terdeteksi braille.
+  // ✅ Fix stability: Dinaikkan 2→8 agar buffer tidak di-reset hanya karena
+  // beberapa frame noise/blur — perlu 8 REJECT berturut-turut baru clear.
+  static const int    gridRejectStreakToClear   = 8;    // consecutive REJECTs → clear text
 
   // ─── Temporal Voting (stability — PRD: text stable in 2s window) ─
-  static const int    votingWindowSize    = 5;   // last N predictions
-  static const int    votingMinAgreement  = 2;   // min votes for winner to be emitted
+  // ✅ Fix stability: Window diperbesar 5→10 (lebih banyak frame untuk voting)
+  // dan minAgreement dinaikkan 2→5 (butuh 50% consensus, bukan hanya 40%).
+  // Efek: output tidak berubah kecuali mayoritas frame benar-benar setuju.
+  static const int    votingWindowSize    = 10;  // last N predictions
+  static const int    votingMinAgreement  = 5;   // min votes for winner (50% of window)
 
   // ─── Auto Text-to-Speech ───────────────────────────────────
   // Speak a stable result automatically once it settles (PRD 5.3).
